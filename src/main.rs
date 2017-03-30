@@ -84,11 +84,24 @@ fn main() {
             .value_name("SERVER_ADDRESS")
             .help("Connects to a server")
             .takes_value(true))
+        .arg(Arg::with_name("port")
+            .short("p")
+            .long("port")
+            .value_name("PORT")
+            .help("The port to use to connect to the server or to host to it. Default value is \
+                   55455")
+            .default_value("55455")
+            .takes_value(true))
         .arg(Arg::with_name("file_path").help("Python file path"))
         .get_matches();
 
+    let port = matches.value_of("port").unwrap();
+
     if let Some(address) = matches.value_of("client") {
+        let address = format!("{}:{}", address, port);
+
         print!("Connecting to {}... ", address);
+        std::io::stdout().flush();
 
         match TcpStream::connect(address) {
             Ok(mut stream) => {
@@ -97,12 +110,15 @@ fn main() {
                 send_request(&mut stream, matches.value_of("file_path").unwrap());
                 receive_response(&mut stream);
             }
-            Err(_) => println!("Cannot connect to {}", address),
+            Err(_) => println!("Connection failed"),
         }
     } else {
         println!("Opening server!");
 
-        let listener = TcpListener::bind("localhost:55455").unwrap();
+        let address = "localhost";
+        let address = format!("{}:{}", address, port);
+
+        let listener = TcpListener::bind(address).unwrap();
 
         for stream in listener.incoming() {
             match stream {
