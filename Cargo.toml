@@ -4,6 +4,5 @@ version = "0.1.0"
 authors = ["Tommaso Checchi <tommaso.checchi1@gmail.com>"]
 
 [dependencies]
-zstd = "0.4.6"
 clap = "2.22.1"
 byteorder = "1.0.0"
