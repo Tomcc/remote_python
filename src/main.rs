@@ -40,6 +40,13 @@ fn receive_response(socket: &mut Read) {
     }
 }
 
+fn find_python_version() -> &'static str {
+    if let Ok(_) = Command::new("python3").status() {
+        return "python3"
+    }
+    return "python"
+}
+
 fn receive_request(socket: &mut TcpStream) {
     //read how many bytes it will be
     let len = socket.read_u64::<LittleEndian>().unwrap();
@@ -49,7 +56,7 @@ fn receive_request(socket: &mut TcpStream) {
     socket.take(len).read_to_string(&mut code);
 
     //run python
-    let child = Command::new("python3")
+    let child = Command::new(find_python_version())
         .args(&["-c", &code])
         .stdout(Stdio::piped())
         .spawn()
@@ -78,12 +85,6 @@ fn main() {
     let matches = App::new("Remote Python")
         .version("0.1")
         .about("Because reasons")
-        .arg(Arg::with_name("client")
-            .short("c")
-            .long("client")
-            .value_name("SERVER_ADDRESS")
-            .help("Connects to a server")
-            .takes_value(true))
         .arg(Arg::with_name("port")
             .short("p")
             .long("port")
@@ -92,13 +93,37 @@ fn main() {
                    55455")
             .default_value("55455")
             .takes_value(true))
+        .arg(Arg::with_name("server")
+            .long("server")
+            .help("If this is specified, this will be a server"))
+        .arg(Arg::with_name("address")
+            .value_name("ADDRESS")
+            .help("Address to connect to")
+            .required(true))
         .arg(Arg::with_name("file_path").help("Python file path"))
         .get_matches();
 
     let port = matches.value_of("port").unwrap();
 
-    if let Some(address) = matches.value_of("client") {
-        let address = format!("{}:{}", address, port);
+    let address = matches.value_of("address").unwrap();
+    let address = format!("{}:{}", address, port);    
+
+    if matches.is_present("server") {
+        println!("Opening server at {}", address);
+
+        let listener = TcpListener::bind(address).unwrap();
+
+        for stream in listener.incoming() {
+            println!("Handling request");
+            match stream {
+                Ok(mut stream) => {
+                    receive_request(&mut stream);
+                }
+                Err(e) => { /* connection failed */ }
+            }
+            println!("Done");
+        }
+    } else {
 
         print!("Connecting to {}... ", address);
         std::io::stdout().flush();
@@ -111,22 +136,6 @@ fn main() {
                 receive_response(&mut stream);
             }
             Err(_) => println!("Connection failed"),
-        }
-    } else {
-        println!("Opening server!");
-
-        let address = "localhost";
-        let address = format!("{}:{}", address, port);
-
-        let listener = TcpListener::bind(address).unwrap();
-
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut stream) => {
-                    receive_request(&mut stream);
-                }
-                Err(e) => { /* connection failed */ }
-            }
         }
     }
 }
