@@ -10,7 +10,8 @@ use std::path::Path;
 use std::fs::File;
 use clap::{Arg, App};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-
+use std::thread;
+use std::sync::mpsc::channel;
 
 fn send_request(socket: &mut Write, pathstr: &str) {
     let path = Path::new(pathstr);
@@ -18,8 +19,8 @@ fn send_request(socket: &mut Write, pathstr: &str) {
     if let Ok(mut file) = File::open(path) {
         let len = file.metadata().unwrap().len();
 
-        socket.write_u64::<LittleEndian>(len);
-        std::io::copy(&mut file, socket);
+        socket.write_u64::<LittleEndian>(len).unwrap();
+        std::io::copy(&mut file, socket).unwrap();
     } else {
         println!("Error: Cannot open path {}", pathstr);
     }
@@ -53,31 +54,61 @@ fn receive_request(socket: &mut TcpStream) {
 
     //read the bytes
     let mut code = String::with_capacity(len as usize);
-    socket.take(len).read_to_string(&mut code);
+    socket.take(len).read_to_string(&mut code).unwrap();
 
     //run python
     let child = Command::new(find_python_version())
         .args(&["-c", &code])
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    socket.write(b"Python execution launched\n");
+    socket.write(b"Python execution launched\n").unwrap();
+    
+    let (tx, rx) = channel();
 
     let child_buf = std::io::BufReader::new(child.stdout.unwrap());
-
-    for line_result in child_buf.lines() {
+    let txc = tx.clone();
+    thread::spawn(move|| {
+        for line_result in child_buf.lines() {
         match line_result {
             Ok(line) => {
-                socket.write(line.as_bytes());
-                socket.write(b"\n");
-                socket.flush();
+                txc.send(line).unwrap();
             }
             Err(e) => {
-                println!("Child error: {}", e);
+                println!("Pipe error: {}", e);
                 break;
             }
         };
+    }
+    });
+
+    let child_buf = std::io::BufReader::new(child.stderr.unwrap());
+    thread::spawn(move|| {
+        for line_result in child_buf.lines() {
+        match line_result {
+            Ok(line) => {
+                tx.send(line).unwrap();
+            }
+            Err(e) => {
+                println!("Pipe error: {}", e);
+                break;
+            }
+        };
+    }
+    });
+
+    //receive all the interleaved channels until both have hung up
+    loop {
+        match rx.recv() {
+            Ok(line) => {
+                socket.write(line.as_bytes()).unwrap();
+                socket.write(b"\n").unwrap();
+                socket.flush().unwrap();
+            },
+            Err(_) => break
+        }
     }
 }
 
@@ -119,14 +150,14 @@ fn main() {
                 Ok(mut stream) => {
                     receive_request(&mut stream);
                 }
-                Err(e) => { /* connection failed */ }
+                Err(_) => { /* connection failed */ }
             }
             println!("Done");
         }
     } else {
 
         print!("Connecting to {}... ", address);
-        std::io::stdout().flush();
+        std::io::stdout().flush().unwrap();
 
         match TcpStream::connect(address) {
             Ok(mut stream) => {
