@@ -58,7 +58,7 @@ fn receive_request(socket: &mut TcpStream) {
 
     //run python
     let child = Command::new(find_python_version())
-        .args(&["-c", &code])
+        .args(&["-u", "-c", &code])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
