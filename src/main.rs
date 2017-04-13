@@ -12,6 +12,7 @@ use clap::{Arg, App};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::thread;
 use std::sync::mpsc::channel;
+use std::io::Result;
 
 fn send_request(socket: &mut Write, pathstr: &str) {
     let path = Path::new(pathstr);
@@ -48,6 +49,33 @@ fn find_python_version() -> &'static str {
     return "python"
 }
 
+fn write_server_response(socket: &mut TcpStream, line: &str) -> Result<usize> {
+    socket.write(line.as_bytes())?;
+    socket.write(b"\n")?;
+    socket.flush()?;
+
+    Ok(0)
+}
+
+fn handle_output<T: Read + Send + 'static>(stream: T, tx: std::sync::mpsc::Sender<String>) { 
+    let child_buf = std::io::BufReader::new(stream);
+    thread::spawn(move|| {
+        for line_result in child_buf.lines() {
+        match line_result {
+            Ok(line) => {
+                if let Err(_) = tx.send(line) {
+                    return;
+                }
+            }
+            Err(e) => {
+                println!("Pipe error: {}", e);
+                break;
+            }
+        };
+    }
+    });
+}
+
 fn receive_request(socket: &mut TcpStream) {
     //read how many bytes it will be
     let len = socket.read_u64::<LittleEndian>().unwrap();
@@ -68,44 +96,17 @@ fn receive_request(socket: &mut TcpStream) {
     
     let (tx, rx) = channel();
 
-    let child_buf = std::io::BufReader::new(child.stdout.unwrap());
-    let txc = tx.clone();
-    thread::spawn(move|| {
-        for line_result in child_buf.lines() {
-        match line_result {
-            Ok(line) => {
-                txc.send(line).unwrap();
-            }
-            Err(e) => {
-                println!("Pipe error: {}", e);
-                break;
-            }
-        };
-    }
-    });
-
-    let child_buf = std::io::BufReader::new(child.stderr.unwrap());
-    thread::spawn(move|| {
-        for line_result in child_buf.lines() {
-        match line_result {
-            Ok(line) => {
-                tx.send(line).unwrap();
-            }
-            Err(e) => {
-                println!("Pipe error: {}", e);
-                break;
-            }
-        };
-    }
-    });
+    handle_output(child.stdout.unwrap(), tx.clone());
+    handle_output(child.stderr.unwrap(), tx);
 
     //receive all the interleaved channels until both have hung up
     loop {
         match rx.recv() {
             Ok(line) => {
-                socket.write(line.as_bytes()).unwrap();
-                socket.write(b"\n").unwrap();
-                socket.flush().unwrap();
+                if let Err(_) = write_server_response(socket, &line) {
+                    println!("Connection dropped, aborting");
+                    break;
+                }
             },
             Err(_) => break
         }
