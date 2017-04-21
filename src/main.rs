@@ -1,5 +1,6 @@
 extern crate clap;
 extern crate byteorder;
+extern crate app_dirs;
 
 use std::process::Command;
 use std::process::Stdio;
@@ -13,6 +14,12 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::thread;
 use std::sync::mpsc::channel;
 use std::io::Result;
+use app_dirs::*;
+
+const APP_INFO: AppInfo = AppInfo {
+    name: "remote_python",
+    author: "tommaso",
+};
 
 fn send_request(socket: &mut Write, pathstr: &str) {
     let path = Path::new(pathstr);
@@ -44,9 +51,9 @@ fn receive_response(socket: &mut Read) {
 
 fn find_python_version() -> &'static str {
     if let Ok(_) = Command::new("python3").status() {
-        return "python3"
+        return "python3";
     }
-    return "python"
+    return "python";
 }
 
 fn write_server_response(socket: &mut TcpStream, line: &str) -> Result<usize> {
@@ -57,23 +64,21 @@ fn write_server_response(socket: &mut TcpStream, line: &str) -> Result<usize> {
     Ok(0)
 }
 
-fn handle_output<T: Read + Send + 'static>(stream: T, tx: std::sync::mpsc::Sender<String>) { 
+fn handle_output<T: Read + Send + 'static>(stream: T, tx: std::sync::mpsc::Sender<String>) {
     let child_buf = std::io::BufReader::new(stream);
-    thread::spawn(move|| {
-        for line_result in child_buf.lines() {
-        match line_result {
-            Ok(line) => {
-                if let Err(_) = tx.send(line) {
-                    return;
-                }
-            }
-            Err(e) => {
-                println!("Pipe error: {}", e);
-                break;
-            }
-        };
-    }
-    });
+    thread::spawn(move || for line_result in child_buf.lines() {
+                      match line_result {
+                          Ok(line) => {
+                              if let Err(_) = tx.send(line) {
+                                  return;
+                              }
+                          }
+                          Err(e) => {
+            println!("Pipe error: {}", e);
+            break;
+        }
+                      };
+                  });
 }
 
 fn receive_request(socket: &mut TcpStream) {
@@ -84,16 +89,20 @@ fn receive_request(socket: &mut TcpStream) {
     let mut code = String::with_capacity(len as usize);
     socket.take(len).read_to_string(&mut code).unwrap();
 
+    //create the cwd
+    let cwd = app_dir(AppDataType::UserConfig, &APP_INFO, "").unwrap();
+
     //run python
     let child = Command::new(find_python_version())
         .args(&["-u", "-c", &code])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .current_dir(&cwd)
         .spawn()
         .unwrap();
 
     socket.write(b"Python execution launched\n").unwrap();
-    
+
     let (tx, rx) = channel();
 
     handle_output(child.stdout.unwrap(), tx.clone());
@@ -107,8 +116,8 @@ fn receive_request(socket: &mut TcpStream) {
                     println!("Connection dropped, aborting");
                     break;
                 }
-            },
-            Err(_) => break
+            }
+            Err(_) => break,
         }
     }
 }
@@ -138,7 +147,7 @@ fn main() {
     let port = matches.value_of("port").unwrap();
 
     let address = matches.value_of("address").unwrap();
-    let address = format!("{}:{}", address, port);    
+    let address = format!("{}:{}", address, port);
 
     if matches.is_present("server") {
         println!("Opening server at {}", address);

@@ -6,3 +6,4 @@ authors = ["Tommaso Checchi <tommaso.checchi1@gmail.com>"]
 [dependencies]
 clap = "2.22.1"
 byteorder = "1.0.0"
+app_dirs = "1.1.1"
