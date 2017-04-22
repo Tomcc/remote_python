@@ -295,15 +295,19 @@ fn server_function(socket: &mut TcpStream) -> std::io::Result<()> {
 
     //create or open the cwd
     let cwd = app_dir(AppDataType::UserConfig, &APP_INFO, "").unwrap();
+    println!("Executing into {:?}", cwd);
 
     //create all sig_files in a given folder
     let sig = create_sig_files(&cwd);
+    println!("Available files {:?}", sig);
 
     //send the request over to the client so it can send new data
     send_json(socket, &sig)?;
 
     //receive the client data
     let client_command: ClientCommand = receive_json(socket)?;
+
+    println!("Client command: {:?}", client_command);
 
     //now receive the files that the client wants to write one by one
     if client_command.num_files > 0 {
