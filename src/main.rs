@@ -164,8 +164,14 @@ fn client_function(socket: &mut TcpStream, python_path: &Path) -> std::io::Resul
     let diff = local_sig.new_and_changed(&server_sig);
 
     //tell the server how many files to expect
+    println!("File being run: {:?}", python_path);
     let command = ClientCommand {
-        python_file_path: python_path.to_str().unwrap().to_owned(),
+        python_file_path: python_path
+            .strip_prefix(&cwd)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
         num_files: diff.len(),
     };
 
