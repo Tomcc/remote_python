@@ -151,7 +151,7 @@ fn client_function(socket: &mut TcpStream, python_path: &Path) -> std::io::Resul
     }
 
     //and now wait for the results of the command
-    let reader = std::io::BufReader::new(socket);
+let reader = std::io::BufReader::new(socket);
     for line_result in reader.lines() {
         match line_result {
             Ok(line) => {
@@ -163,8 +163,11 @@ fn client_function(socket: &mut TcpStream, python_path: &Path) -> std::io::Resul
             }
         };
     }
-
     Ok(())
+}
+
+fn receive_response(socket: &mut Read) {
+    
 }
 
 fn find_python_version() -> &'static str {
