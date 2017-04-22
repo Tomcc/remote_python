@@ -2,11 +2,14 @@
 
 Killall remote_python
 
-if cargo install --force; then
+if cargo build --release; then
+	cd test
 	#start server
-	remote_python &
+	../target/release/remote_python --server localhost &
 
-	remote_python --client "localhost:55455" "test.py"
+	sleep 0.1
+
+	../target/release/remote_python "localhost" "test.py"
 
 	exit 0
 fi

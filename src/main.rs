@@ -22,8 +22,8 @@ use std::thread;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::io::Result;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use app_dirs::*;
-
 
 const APP_INFO: AppInfo = AppInfo {
     name: "remote_python",
@@ -31,8 +31,6 @@ const APP_INFO: AppInfo = AppInfo {
 };
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
-    println!("{:?}", path);
-
     let mut file = File::open(&path)?;
 
     let mut buffer = [0; 4096];
@@ -47,17 +45,17 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(base64::encode(&res))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 struct FolderEntry {
     path: String,
     hash: String,
 }
 
 impl FolderEntry {
-    fn from_path(path: &Path) -> std::io::Result<Self> {
+    fn from_path(rel_path: &Path, root: &Path) -> std::io::Result<Self> {
         Ok(FolderEntry {
-               path: path.to_str().unwrap().to_owned(),
-               hash: hash_file(path)?,
+               path: rel_path.to_str().unwrap().to_owned(),
+               hash: hash_file(&root.join(rel_path))?,
            })
     }
 }
@@ -72,13 +70,18 @@ impl FolderSignature {
         FolderSignature { entries: vec![] }
     }
 
-    fn add_entry(&mut self, path: &Path) -> std::io::Result<()> {
-        self.entries.push(FolderEntry::from_path(path)?);
+    fn add_entry(&mut self, path: &Path, root: &Path) -> std::io::Result<()> {
+        self.entries.push(FolderEntry::from_path(path, root)?);
         Ok(())
     }
 
     fn contains(&self, entry: &FolderEntry) -> bool {
-        return false;
+        for e in &self.entries {
+            if e == entry {
+                return true;
+            }
+        }
+        false
     }
 
     fn new_and_changed(&self, other: &FolderSignature) -> Vec<PathBuf> {
@@ -107,43 +110,66 @@ struct ClientCommand {
     num_files: usize,
 }
 
+fn send_json<T: serde::Serialize>(socket: &mut TcpStream, val: &T) -> std::io::Result<()> {
+    //serialize to string
+    let buf = serde_json::to_string(val)?;
+
+    //send length and body
+    socket
+        .write_u64::<LittleEndian>(buf.as_bytes().len() as u64)?;
+    socket.write_all(buf.as_bytes())?;
+
+    Ok(())
+}
+
+fn receive_json<T: serde::de::DeserializeOwned>(socket: &mut TcpStream) -> std::io::Result<T> {
+    //read the length
+    let len = socket.read_u64::<LittleEndian>()?;
+    let mut buf = String::with_capacity(len as usize);
+
+    socket.take(len).read_to_string(&mut buf)?;
+
+    Ok(serde_json::from_str::<T>(&buf).unwrap())
+}
+
 fn send_file(socket: &mut TcpStream, rel_path: &Path, root: &Path) -> std::io::Result<()> {
     let abs_path = root.join(rel_path);
 
     let mut file = File::open(abs_path)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
 
     let header = FileHeader {
-        length: file.metadata().unwrap().len() as usize,
+        length: buf.len(),
         rel_path: rel_path.to_str().unwrap().to_owned(),
     };
 
     //send the file metadata
-    serde_json::to_writer(socket.try_clone()?, &header)?;
+    send_json(socket, &header)?;
 
-    //send the file all at once
-    std::io::copy(&mut file, socket)?;
+    socket.write_all(&buf)?;
 
     Ok(())
 }
 
 fn client_function(socket: &mut TcpStream, python_path: &Path) -> std::io::Result<()> {
     //receive the status of files on the server
-    let server_sig: FolderSignature = serde_json::from_reader(socket.try_clone()?)?;
+    let server_sig: FolderSignature = receive_json(socket)?;
 
     //make our own folder signature
-    let cwd = python_path.parent().unwrap();
+    let cwd = std::env::current_dir()?;
     let local_sig = create_sig_files(&cwd);
 
     //make a diff, find new files and changed files
     let diff = local_sig.new_and_changed(&server_sig);
 
     //tell the server how many files to expect
-    let command = ClientCommand{
+    let command = ClientCommand {
         python_file_path: python_path.to_str().unwrap().to_owned(),
-        num_files: diff.len()
+        num_files: diff.len(),
     };
 
-    serde_json::to_writer(socket.try_clone()?, &command)?;
+    send_json(socket, &command)?;
 
     //send all files
     for rel_path in diff {
@@ -237,7 +263,11 @@ fn create_sig_files(cwd: &Path) -> FolderSignature {
     let mut sig = FolderSignature::new();
 
     visit_dirs(&cwd,
-               &mut |entry| { sig.add_entry(&entry.path()).unwrap(); })
+               &mut |entry| {
+                        let abs_path = entry.path();
+                        let rel_path = abs_path.strip_prefix(&cwd).unwrap();
+                        sig.add_entry(&rel_path, &cwd).unwrap();
+                    })
             .unwrap();
 
     sig
@@ -246,22 +276,22 @@ fn create_sig_files(cwd: &Path) -> FolderSignature {
 fn download_files(socket: &mut TcpStream, root: &Path, num_files: usize) -> std::io::Result<()> {
     //attempt to download that many files
     for _ in 0..num_files {
-        let header: FileHeader = serde_json::from_reader(socket.try_clone()?)?;
-        let abs_path = root.join(header.rel_path);
-        println!("Downloading {:?}", abs_path);
+        let header: FileHeader = receive_json(socket)?;
+        let abs_path = root.join(&header.rel_path);
 
-        let mut content = String::with_capacity(header.length);
-        socket
-            .take(content.len() as u64)
-            .read_to_string(&mut content)?;
+        fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
 
         let mut file = File::create(&abs_path)?;
-        file.write_all(content.as_bytes())?;
+        let mut buffer = Vec::new();
+        socket
+            .take(header.length as u64)
+            .read_to_end(&mut buffer)?;
+        file.write_all(&buffer)?;
     }
     Ok(())
 }
 
-fn receive_request(socket: &mut TcpStream) -> std::io::Result<()> {
+fn server_function(socket: &mut TcpStream) -> std::io::Result<()> {
 
     //create or open the cwd
     let cwd = app_dir(AppDataType::UserConfig, &APP_INFO, "").unwrap();
@@ -270,13 +300,17 @@ fn receive_request(socket: &mut TcpStream) -> std::io::Result<()> {
     let sig = create_sig_files(&cwd);
 
     //send the request over to the client so it can send new data
-    serde_json::to_writer(socket.try_clone()?, &sig)?;
+    send_json(socket, &sig)?;
 
     //receive the client data
-    let client_command: ClientCommand = serde_json::from_reader(socket.try_clone()?)?;
+    let client_command: ClientCommand = receive_json(socket)?;
 
     //now receive the files that the client wants to write one by one
-    download_files(socket, &cwd, client_command.num_files)?;
+    if client_command.num_files > 0 {
+        socket.write(b"Downloading new files... ")?;
+        download_files(socket, &cwd, client_command.num_files)?;
+        socket.write(b"Done\n")?;
+    }
 
     //run python on the file indicated by the client
     let child = Command::new(find_python_version())
@@ -337,26 +371,14 @@ fn main() {
     let address = format!("{}:{}", address, port);
 
     if matches.is_present("server") {
-
-        //create or open the cwd
-        let cwd = app_dir(AppDataType::UserConfig, &APP_INFO, "").unwrap();
-
-        //create all sig_files in a given folder
-        let sig = create_sig_files(&cwd);
-
-        let sig_json = serde_json::to_string(&sig).unwrap();
-
-        println!("{}", sig_json);
-
-        println!("Opening server at {}", address);
-
-        let listener = TcpListener::bind(address).unwrap();
+        let listener = TcpListener::bind(&address).unwrap();
+        println!("Opened server at {}", address);
 
         for stream in listener.incoming() {
             println!("Handling request");
             match stream {
                 Ok(mut stream) => {
-                    if let Err(e) = receive_request(&mut stream) {
+                    if let Err(e) = server_function(&mut stream) {
                         println!("Something went wrong: {:?}", e);
                     }
                 }
